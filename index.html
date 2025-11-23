@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>2D 샌드박스 멀티플레이</title>
+  <meta name="theme-color" content="#0b1021" />
+  <style>
+    :root {
+      --bg: #0b1021;
+      --panel: #0f1833;
+      --border: #22335f;
+      --text: #e9f0ff;
+      --accent: #7cc6ff;
+      --tile: #7e5e2f;
+      --tile2: #3a7a5e;
+      --me: #50e0ff;
+      --other: #ffd54f;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR", sans-serif;
+    }
+    .wrap {
+      max-width: 980px; margin: 0 auto; padding: 10px; display: flex; flex-direction: column; gap: 10px;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+    }
+    h1 { font-size: 1rem; margin: 0; }
+    .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    select, button, input[type="text"] {
+      background: #16203d; color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+      padding: 7px 10px; font-size: 0.92rem;
+    }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    .grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    }
+    canvas {
+      width: 100%; aspect-ratio: 16 / 9; background: #0a132b; border: 1px solid var(--border); border-radius: 10px;
+      touch-action: none;
+    }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px;
+    }
+    .row { display: flex; gap: 6px; align-items: center; }
+    .chat-log {
+      height: 140px; overflow: auto; background: #0c1530; border: 1px solid #1e2c58; border-radius: 8px; padding: 6px;
+      font-size: 0.9rem;
+    }
+    .mobile-pad {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;
+    }
+    .pad-btn {
+      background: #16203d; border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 12px; text-align: center;
+      user-select: none;
+    }
+    .pad-btn:active { background: #1a2447; }
+    footer { text-align: center; font-size: 0.8rem; opacity: 0.75; padding-bottom: 10px; }
+    .badge { background: #13224a; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>2D 샌드박스 멀티플레이</h1>
+      <div class="controls">
+        <span class="badge">연결: <span id="conn">끊김</span></span>
+        <span class="badge">플레이어: <span id="pc">0</span></span>
+        <select id="tileSelect" title="타일 종류">
+          <option value="dirt" selected>흙</option>
+          <option value="grass">잔디</option>
+        </select>
+        <button id="modePlace">배치</button>
+        <button id="modeErase">삭제</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="panel">
+        <canvas id="game" width="960" height="540" aria-label="Playfield"></canvas>
+        <div class="mobile-pad" id="pad">
+          <div class="pad-btn" data-k="left">◀︎</div>
+          <div class="pad-btn" data-k="down">▼</div>
+          <div class="pad-btn" data-k="right">▶︎</div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="row" style="margin-bottom:6px;">
+          <input id="nameInput" type="text" placeholder="닉네임" style="flex:1;" />
+          <button id="applyName">적용</button>
+        </div>
+        <div class="chat-log" id="chatLog" aria-live="polite"></div>
+        <div class="row" style="margin-top:6px;">
+          <input id="chatInput" type="text" placeholder="메시지 입력" style="flex:1;" />
+          <button id="chatSend">전송</button>
+        </div>
+        <p style="margin-top:8px; font-size:0.9rem; opacity:0.85;">
+          화면을 탭하면 현재 모드로 타일을 배치/삭제합니다. 드래그로 카메라 이동, 핀치로 확대/축소.
+        </p>
+      </div>
+    </div>
+
+    <footer>클라이언트만 포함된 단일 파일. WebSocket 서버 주소를 교체해 사용하세요.</footer>
+  </div>
+
+  <script>
+    // ===== 설정: WebSocket 서버 주소 교체 =====
+    // 예: wss://your-app.onrender.com  또는  wss://your-domain/ws
+    const WS_URL = "wss://YOUR_WEBSOCKET_SERVER_URL";
+
+    // ===== 기본 상태 =====
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const connEl = document.getElementById('conn');
+    const pcEl = document.getElementById('pc');
+    const tileSel = document.getElementById('tileSelect');
+    const modePlaceBtn = document.getElementById('modePlace');
+    const modeEraseBtn = document.getElementById('modeErase');
+    const chatLog = document.getElementById('chatLog');
+    const chatInput = document.getElementById('chatInput');
+    const chatSend = document.getElementById('chatSend');
+    const nameInput = document.getElementById('nameInput');
+    const applyName = document.getElementById('applyName');
+    const pad = document.getElementById('pad');
+
+    const TILE_SIZE = 24;
+    const WORLD_LIMIT = { minX: -200, maxX: 200, minY: -100, maxY: 150 };
+    const camera = { x: 0, y: 0, scale: 1 };
+    const me = { id: null, name: "", x: 0, y: 0 };
+    let players = {};     // {id: {name,x,y}}
+    let world = {};       // {"x,y": "dirt"/"grass"}
+    let mode = "place";   // or "erase"
+    let ws = null;
+
+    // ===== 연결 =====
+    function connect() {
+      ws = new WebSocket(WS_URL);
+      connEl.textContent = "연결중...";
+
+      ws.onopen = () => { connEl.textContent = "연결됨"; };
+      ws.onclose = () => {
+        connEl.textContent = "끊김";
+        setTimeout(connect, 1500); // 자동 재연결
+      };
+      ws.onerror = () => { connEl.textContent = "오류"; };
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        switch (msg.type) {
+          case "init":
+            me.id = msg.id; me.name = msg.name || me.name; me.x = msg.x || 0; me.y = msg.y || 0;
+            break;
+          case "players":
+            players = msg.players || players;
+            pcEl.textContent = Object.keys(players).length;
+            break;
+          case "world":
+            world = msg.world || world;
+            break;
+          case "chat":
+            addChat(msg.fromName || "익명", msg.text);
+            break;
+          case "patch":
+            // 부분 업데이트(타일 하나 변경 등)
+            for (const k in msg.world) {
+              if (msg.world[k] === null) delete world[k];
+              else world[k] = msg.world[k];
+            }
+            break;
+        }
+      };
+    }
+    connect();
+
+    // ===== 입력: 플레이어 이동 =====
+    const keys = new Set();
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (["arrowleft","a"].includes(k)) keys.add("left");
+      if (["arrowright","d"].includes(k)) keys.add("right");
+      if (["arrowup","w"].includes(k)) keys.add("up");
+      if (["arrowdown","s"].includes(k)) keys.add("down");
+    });
+    window.addEventListener('keyup', (e) => {
+      const k = e.key.toLowerCase();
+      if (["arrowleft","a"].includes(k)) keys.delete("left");
+      if (["arrowright","d"].includes(k)) keys.delete("right");
+      if (["arrowup","w"].includes(k)) keys.delete("up");
+      if (["arrowdown","s"].includes(k)) keys.delete("down");
+    });
+
+    // 모바일 패드
+    pad.addEventListener('touchstart', (e) => {
+      for (const t of e.targetTouches) {
+        const el = document.elementFromPoint(t.clientX, t.clientY);
+        const k = el?.getAttribute('data-k');
+        if (k) keys.add(k);
+      }
+    }, { passive: true });
+    pad.addEventListener('touchend', (e) => { keys.clear(); });
+
+    // ===== 카메라 조작(드래그/핀치줌/휠) =====
+    let dragging = false, lastX = 0, lastY = 0;
+    canvas.addEventListener('mousedown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+    window.addEventListener('mouseup', () => dragging = false);
+    window.addEventListener('mousemove', (e) => {
+      if (dragging) {
+        camera.x -= (e.clientX - lastX) / camera.scale;
+        camera.y -= (e.clientY - lastY) / camera.scale;
+        lastX = e.clientX; lastY = e.clientY;
+      }
+    });
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const s = Math.exp(-e.deltaY * 0.001);
+      camera.scale = clamp(camera.scale * s, 0.5, 2.5);
+    }, { passive: false });
+
+    // 터치: 핀치 줌
+    let pinchDist = 0;
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) {
+        pinchDist = distTouches(e.touches[0], e.touches[1]);
+      }
+    }, { passive: true });
+    canvas.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2) {
+        const d = distTouches(e.touches[0], e.touches[1]);
+        const s = clamp(d / (pinchDist || d), 0.8, 1.25);
+        camera.scale = clamp(camera.scale * s, 0.5, 2.5);
+        pinchDist = d;
+      }
+    }, { passive: true });
+
+    // ===== 배치/삭제 =====
+    function worldCoordFromEvent(e) {
+      const rect = canvas.getBoundingClientRect();
+      const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const py = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const wx = Math.floor((px / camera.scale + camera.x) / TILE_SIZE);
+      const wy = Math.floor((py / camera.scale + camera.y) / TILE_SIZE);
+      return { x: clamp(wx, WORLD_LIMIT.minX, WORLD_LIMIT.maxX), y: clamp(wy, WORLD_LIMIT.minY, WORLD_LIMIT.maxY) };
+    }
+    canvas.addEventListener('click', (e) => {
+      const { x, y } = worldCoordFromEvent(e);
+      if (!ws || ws.readyState !== 1) return;
+      if (mode === "place") {
+        ws.send(JSON.stringify({ type: "place", x, y, tile: tileSel.value }));
+      } else {
+        ws.send(JSON.stringify({ type: "erase", x, y }));
+      }
+    });
+
+    // ===== UI 모드 전환 =====
+    modePlaceBtn.onclick = () => { mode = "place"; modePlaceBtn.style.borderColor = "#7cc6ff"; modeEraseBtn.style.borderColor = "var(--border)"; };
+    modeEraseBtn.onclick = () => { mode = "erase"; modeEraseBtn.style.borderColor = "#7cc6ff"; modePlaceBtn.style.borderColor = "var(--border)"; };
+
+    // ===== 닉네임/채팅 =====
+    applyName.onclick = () => {
+      me.name = nameInput.value.trim().slice(0, 20) || "익명";
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "rename", name: me.name }));
+    };
+    chatSend.onclick = sendChat;
+    chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+    function sendChat() {
+      const text = chatInput.value.trim().slice(0, 140);
+      if (!text || !ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({ type: "chat", text }));
+      chatInput.value = "";
+    }
+    function addChat(name, text) {
+      const line = document.createElement('div');
+      line.textContent = `${name}: ${text}`;
+      chatLog.appendChild(line);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    // ===== 렌더링 =====
+    function draw() {
+      ctx.fillStyle = '#0a132b';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.scale(camera.scale, camera.scale);
+      ctx.translate(-camera.x, -camera.y);
+
+      // 그리드 라인(살짝)
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.beginPath();
+      for (let gx = -1000; gx <= 1000; gx += TILE_SIZE) {
+        ctx.moveTo(gx, -1000); ctx.lineTo(gx, 1000);
+      }
+      for (let gy = -1000; gy <= 1000; gy += TILE_SIZE) {
+        ctx.moveTo(-1000, gy); ctx.lineTo(1000, gy);
+      }
+      ctx.stroke();
+
+      // 타일
+      for (const key in world) {
+        const [x, y] = key.split(',').map(Number);
+        const px = x * TILE_SIZE, py = y * TILE_SIZE;
+        const t = world[key];
+        ctx.fillStyle = t === "grass" ? getPatternColor(px, py, "--tile2") : getPatternColor(px, py, "--tile");
+        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+        // 테두리
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.strokeRect(px + 0.5, py + 0.5, TILE_SIZE - 1, TILE_SIZE - 1);
+      }
+
+      // 플레이어
+      for (const id in players) {
+        const p = players[id];
+        const px = p.x * TILE_SIZE, py = p.y * TILE_SIZE;
+        ctx.fillStyle = (id == me.id) ? getCss("--me") : getCss("--other");
+        roundRect(px, py, TILE_SIZE, TILE_SIZE, 6, true);
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.font = '12px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(p.name || '익명', px + TILE_SIZE / 2, py - 6);
+      }
+
+      ctx.restore();
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+
+    // ===== 게임 루프: 이동 동기화 =====
+    let lastSend = 0;
+    function loop(now = performance.now()) {
+      const speed = 0.08; // 셀/밀리초
+      if (keys.has("left")) me.x -= speed;
+      if (keys.has("right")) me.x += speed;
+      if (keys.has("up")) me.y -= speed;
+      if (keys.has("down")) me.y += speed;
+      me.x = clamp(me.x, WORLD_LIMIT.minX, WORLD_LIMIT.maxX);
+      me.y = clamp(me.y, WORLD_LIMIT.minY, WORLD_LIMIT.maxY);
+
+      // 주기적으로 서버로 내 위치 전송(50ms)
+      if (ws && ws.readyState === 1 && now - lastSend > 50) {
+        ws.send(JSON.stringify({ type: "move", x: me.x, y: me.y }));
+        lastSend = now;
+      }
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // ===== 유틸 =====
+    function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+    function roundRect(x, y, w, h, r, fill) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      if (fill) ctx.fill();
+    }
+    function getCss(varName) { return getComputedStyle(document.documentElement).getPropertyValue(varName).trim(); }
+    function getPatternColor(px, py, varName) {
+      const base = getCss(varName);
+      // 살짝 변조로 질감 효과
+      const m = ((px * 13 + py * 7) % 32) / 32;
+      const c = hexToRgb(base || "#7e5e2f");
+      const k = 0.12 - m * 0.08;
+      return `rgb(${clamp(Math.round(c.r*(1-k)),0,255)},${clamp(Math.round(c.g*(1-k)),0,255)},${clamp(Math.round(c.b*(1-k)),0,255)})`;
+    }
+    function hexToRgb(h) {
+      const s = h.replace('#',''); const b = s.length===3 ? s.split('').map(c=>c+c).join('') : s;
+      const n = parseInt(b,16); return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
+    }
+    function distTouches(a,b){ const dx=a.clientX-b.clientX, dy=a.clientY-b.clientY; return Math.hypot(dx,dy); }
+  </script>
+</body>
+</html>
